@@ -1,0 +1,19 @@
+{
+  "name": "kanban-mock-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "In-memory mock realtime server for the Kanban machine test. Simulates a real backend: accepts board actions over Socket.IO, occasionally rejects writes (to exercise optimistic rollback), and broadcasts confirmed changes to every connected session.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
