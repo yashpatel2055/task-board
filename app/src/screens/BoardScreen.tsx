@@ -28,7 +28,6 @@ export function BoardScreen() {
   const columns = useBoardStore(s => s.columns);
   const cards = useBoardStore(s => s.cards);
   const queue = useQueueStore(s => s.queue);
-  const isOnline = useNetworkStore(s => s.isOnline);
   const isSocketConnected = useNetworkStore(s => s.isSocketConnected);
 
   const [query, setQuery] = useState('');
@@ -117,7 +116,9 @@ export function BoardScreen() {
     dispatchAction(built);
   };
 
-  const showOfflineBanner = !isOnline || !isSocketConnected;
+  // The socket is the sync channel: if it's connected we can reach the server,
+  // regardless of what NetInfo's (often unreliable) reachability probe reports.
+  const showOfflineBanner = !isSocketConnected;
 
   return (
     <SafeAreaView style={styles.safe}>

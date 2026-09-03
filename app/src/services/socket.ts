@@ -8,10 +8,15 @@ let socket: Socket | null = null;
 export function getSocket(): Socket {
   if (!socket) {
     socket = io(SERVER_URL, {
-      transports: ['websocket'],
+      // Start on long-polling and let Engine.IO upgrade to WebSocket. A
+      // websocket-only client silently fails on networks/proxies that block the
+      // raw upgrade, which looks identical to "server is down".
+      transports: ['polling', 'websocket'],
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
     });
 
     socket.on('connect', () => useNetworkStore.getState().setSocketConnected(true));

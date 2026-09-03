@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import {
   Image,
   Modal,
+  PermissionsAndroid,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -10,6 +12,26 @@ import {
 } from 'react-native';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 import { Card } from '../../types';
+import { useToastStore } from '../../store/useToastStore';
+
+// The manifest declares android.permission.CAMERA, so react-native-image-picker
+// requires it to be granted at runtime before launchCamera() will open.
+async function ensureCameraPermission(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  try {
+    const result = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.CAMERA,
+      {
+        title: 'Camera permission',
+        message: 'The app needs camera access to attach a photo to a card.',
+        buttonPositive: 'OK',
+      },
+    );
+    return result === PermissionsAndroid.RESULTS.GRANTED;
+  } catch {
+    return false;
+  }
+}
 
 export interface CardEditResult {
   title: string;
@@ -42,12 +64,36 @@ export function CardEditModal({ visible, editingCard, onCancel, onSave }: Props)
 
   const pickFromLibrary = async () => {
     const result = await launchImageLibrary({ mediaType: 'photo', quality: 0.7 });
+    if (result.didCancel) return;
+    if (result.errorCode) {
+      useToastStore.getState().show({
+        message: result.errorMessage || "Couldn't open the gallery.",
+        durationMs: 3000,
+      });
+      return;
+    }
     const uri = result.assets?.[0]?.uri;
     if (uri) setImageUri(uri);
   };
 
   const pickFromCamera = async () => {
+    const granted = await ensureCameraPermission();
+    if (!granted) {
+      useToastStore.getState().show({
+        message: 'Camera permission denied. Enable it in Settings to attach a photo.',
+        durationMs: 3500,
+      });
+      return;
+    }
     const result = await launchCamera({ mediaType: 'photo', quality: 0.7, saveToPhotos: false });
+    if (result.didCancel) return;
+    if (result.errorCode) {
+      useToastStore.getState().show({
+        message: result.errorMessage || "Couldn't open the camera.",
+        durationMs: 3000,
+      });
+      return;
+    }
     const uri = result.assets?.[0]?.uri;
     if (uri) setImageUri(uri);
   };

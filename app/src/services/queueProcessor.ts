@@ -98,8 +98,11 @@ function backOffOrGiveUp(action: QueueAction): void {
 async function drainQueue(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const { isOnline, isSocketConnected } = useNetworkStore.getState();
-    if (!isOnline || !isSocketConnected) return;
+    // A live socket is proof we can reach the server. Don't also gate on
+    // NetInfo's reachability probe, which reports false negatives on some
+    // networks and would otherwise wedge the queue shut forever.
+    const { isSocketConnected } = useNetworkStore.getState();
+    if (!isSocketConnected) return;
 
     const next = useQueueStore.getState().queue.find(a => a.status === 'pending');
     if (!next) return;
@@ -140,7 +143,10 @@ export function startSyncEngine(): () => void {
   getSocket();
 
   const unsubNetInfo = NetInfo.addEventListener(state => {
-    const online = Boolean(state.isConnected && state.isInternetReachable !== false);
+    // Only treat the device as offline when NetInfo is certain there's no
+    // interface at all. `isInternetReachable` is a best-effort probe that
+    // returns false/null on plenty of working networks, so we don't rely on it.
+    const online = state.isConnected !== false;
     useNetworkStore.getState().setOnline(online);
     if (online) void processQueue();
   });
