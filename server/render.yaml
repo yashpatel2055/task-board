@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: kanban-mock-server
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true

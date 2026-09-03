@@ -1,4 +1,10 @@
-import { applyPatch, mergeConfirmedPatch, queueHasPendingActionForCard } from '../src/engine/patch';
+import {
+  applyPatch,
+  mergeConfirmedPatch,
+  queueHasPendingActionForCard,
+  recordTombstone,
+  reconcileServerBoard,
+} from '../src/engine/patch';
 import {
   buildCreateCardAction,
   buildDeleteCardAction,
@@ -56,7 +62,7 @@ describe('applyPatch', () => {
   it('removeCard is a safe no-op when the card is already gone', () => {
     const state = makeState([]);
     const next = applyPatch(state, { kind: 'removeCard', cardId: 'does-not-exist' });
-    expect(next).toBe(state); // same reference: no spurious re-render
+    expect(next).toBe(state);
   });
 
   it('a noop patch never changes state', () => {
@@ -86,7 +92,7 @@ describe('action builders produce correct forward + inverse patches', () => {
 
     const afterForward = applyPatch(state, built.forwardPatch);
     expect(afterForward.cards[0].title).toBe('After');
-    expect(afterForward.cards[0].description).toBe('desc'); // untouched field preserved
+    expect(afterForward.cards[0].description).toBe('desc');
 
     const afterInverse = applyPatch(afterForward, built.inversePatch);
     expect(afterInverse.cards[0]).toEqual(original);
@@ -187,6 +193,36 @@ describe('mergeConfirmedPatch (remote update conflict handling)', () => {
     expect(next.cards[0].title).toBe('Current');
   });
 
+  it('ignores a stale upsert for a card that was already deleted (tombstone guard)', () => {
+    let state = makeState([makeCard({ version: 5 })]);
+    const tombstones = new Map<string, number>();
+    const deletePatch = { kind: 'removeCard' as const, cardId: 'card-1', version: 6 };
+
+    recordTombstone(tombstones, deletePatch, state);
+    state = mergeConfirmedPatch(state, deletePatch, [], tombstones);
+    expect(state.cards).toHaveLength(0);
+
+    const stale = { kind: 'upsertCard' as const, card: makeCard({ title: 'Zombie', version: 4 }) };
+    state = mergeConfirmedPatch(state, stale, [], tombstones);
+    expect(state.cards).toHaveLength(0);
+
+    const recreate = { kind: 'upsertCard' as const, card: makeCard({ title: 'Reborn', version: 9 }) };
+    state = mergeConfirmedPatch(state, recreate, [], tombstones);
+    expect(state.cards).toHaveLength(1);
+    expect(state.cards[0].title).toBe('Reborn');
+  });
+
+  it('recordTombstone only reacts to removeCard patches', () => {
+    const tombstones = new Map<string, number>();
+    const state = makeState();
+    recordTombstone(tombstones, { kind: 'upsertCard', card: makeCard() }, state);
+    recordTombstone(tombstones, { kind: 'noop' }, state);
+    expect(tombstones.size).toBe(0);
+
+    recordTombstone(tombstones, { kind: 'removeCard', cardId: 'card-1' }, makeState([makeCard({ version: 7 })]));
+    expect(tombstones.get('card-1')).toBe(7);
+  });
+
   it('queueHasPendingActionForCard checks CREATE/UPDATE/DELETE/MOVE payload shapes', () => {
     const q: QueueAction[] = [
       {
@@ -202,5 +238,82 @@ describe('mergeConfirmedPatch (remote update conflict handling)', () => {
     ];
     expect(queueHasPendingActionForCard(q, 'new-card')).toBe(true);
     expect(queueHasPendingActionForCard(q, 'someone-else')).toBe(false);
+  });
+});
+
+describe('reconcileServerBoard (merging a server snapshot into local state on reconnect)', () => {
+  const cols = [
+    { id: 'col-a', title: 'To Do', order: 0 },
+    { id: 'col-b', title: 'In Progress', order: 1 },
+  ];
+
+  it('takes the server card when it is newer, and adds server cards we do not have', () => {
+    const local: BoardState = { columns: cols, cards: [makeCard({ id: 'c1', title: 'Local v1', version: 1 })] };
+    const server: BoardState = {
+      columns: cols,
+      cards: [
+        makeCard({ id: 'c1', title: 'Server v3', version: 3 }),
+        makeCard({ id: 'c2', title: 'Made elsewhere while we were away', version: 5 }),
+      ],
+    };
+
+    const next = reconcileServerBoard(local, server, []);
+    expect(next.cards.find(c => c.id === 'c1')!.title).toBe('Server v3');
+    expect(next.cards.find(c => c.id === 'c2')!.title).toBe('Made elsewhere while we were away');
+  });
+
+  it('keeps a local optimistic edit that still has a pending queue action', () => {
+    const local: BoardState = { columns: cols, cards: [makeCard({ id: 'c1', title: 'My offline edit', version: 1 })] };
+    const server: BoardState = { columns: cols, cards: [makeCard({ id: 'c1', title: 'Server thinks this', version: 9 })] };
+    const queue: QueueAction[] = [
+      {
+        localId: 'act-1',
+        type: 'UPDATE_CARD',
+        payload: { cardId: 'c1', changes: { title: 'My offline edit' } },
+        forwardPatch: { kind: 'noop' },
+        inversePatch: { kind: 'noop' },
+        createdAt: Date.now(),
+        status: 'pending',
+        retries: 0,
+      },
+    ];
+
+    const next = reconcileServerBoard(local, server, queue);
+    expect(next.cards.find(c => c.id === 'c1')!.title).toBe('My offline edit');
+  });
+
+  it('keeps an offline-created card the server does not have yet (pending CREATE), but drops one with nothing pending', () => {
+    const local: BoardState = {
+      columns: cols,
+      cards: [
+        makeCard({ id: 'offline-new', title: 'Created offline', version: 0 }),
+        makeCard({ id: 'stale-local', title: 'Deleted on another device', version: 2 }),
+      ],
+    };
+    const server: BoardState = { columns: cols, cards: [] };
+    const queue: QueueAction[] = [
+      {
+        localId: 'act-1',
+        type: 'CREATE_CARD',
+        payload: { card: makeCard({ id: 'offline-new' }) },
+        forwardPatch: { kind: 'noop' },
+        inversePatch: { kind: 'noop' },
+        createdAt: Date.now(),
+        status: 'pending',
+        retries: 0,
+      },
+    ];
+
+    const next = reconcileServerBoard(local, server, queue);
+    expect(next.cards.map(c => c.id)).toEqual(['offline-new']);
+  });
+
+  it('does not resurrect a tombstoned card even if the snapshot still contains it', () => {
+    const local: BoardState = { columns: cols, cards: [] };
+    const server: BoardState = { columns: cols, cards: [makeCard({ id: 'gone', version: 4 })] };
+    const tombstones = new Map<string, number>([['gone', 5]]);
+
+    const next = reconcileServerBoard(local, server, [], tombstones);
+    expect(next.cards).toHaveLength(0);
   });
 });

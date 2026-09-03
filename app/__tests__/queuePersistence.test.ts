@@ -35,7 +35,6 @@ describe('offline queue persistence (AsyncStorage)', () => {
   it('writes the queue to AsyncStorage when an action is enqueued', async () => {
     useQueueStore.getState().enqueue(sampleAction('act-1'));
 
-    // Zustand's persist middleware writes asynchronously; flush microtasks.
     await new Promise(resolve => setTimeout(resolve, 0));
 
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
@@ -59,9 +58,6 @@ describe('offline queue persistence (AsyncStorage)', () => {
   });
 
   it('a queue persisted to storage rehydrates into a fresh store instance on next launch', async () => {
-    // Simulate "the app was closed with two actions still queued": seed
-    // AsyncStorage directly, then re-import the store module fresh (as a
-    // cold app launch would) and confirm it rehydrates from what's there.
     const seeded = {
       state: { queue: [sampleAction('act-1'), sampleAction('act-2')] },
       version: 0,
@@ -74,11 +70,30 @@ describe('offline queue persistence (AsyncStorage)', () => {
       freshQueueStore = require('../src/store/useQueueStore').useQueueStore;
     });
 
-    // Rehydration is async; wait for the `hydrated` flag zustand's persist
-    // middleware flips once it has read storage back in.
     await new Promise(resolve => setTimeout(resolve, 0));
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(freshQueueStore!.getState().queue.map(a => a.localId)).toEqual(['act-1', 'act-2']);
+  });
+
+  it('resets actions left mid-send (or previously failed) back to pending on a cold start', async () => {
+    const stuck = { ...sampleAction('act-1'), status: 'sending' as const, retries: 3 };
+    const givenUp = { ...sampleAction('act-2'), status: 'failed' as const, retries: 8, lastError: 'boom' };
+    const seeded = { state: { queue: [stuck, givenUp] }, version: 0 };
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
+
+    let freshQueueStore: typeof useQueueStore;
+    await jest.isolateModulesAsync(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      freshQueueStore = require('../src/store/useQueueStore').useQueueStore;
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const q = freshQueueStore!.getState().queue;
+    expect(q.map(a => a.localId)).toEqual(['act-1', 'act-2']);
+    expect(q.every(a => a.status === 'pending')).toBe(true);
+    expect(q.every(a => a.retries === 0)).toBe(true);
+    expect(q.every(a => a.lastError === undefined)).toBe(true);
   });
 });

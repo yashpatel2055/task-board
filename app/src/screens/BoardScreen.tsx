@@ -90,9 +90,6 @@ export function BoardScreen() {
     const state = { columns: useBoardStore.getState().columns, cards: useBoardStore.getState().cards };
     const built = buildDeleteCardAction(state, card.id);
 
-    // Apply the delete to the UI immediately, but hold off telling the
-    // server for the undo window -- if the user taps Undo, we just apply
-    // the inverse patch and nothing ever hits the network/queue.
     applyOptimistic(built.forwardPatch);
 
     useToastStore.getState().show({
@@ -108,7 +105,14 @@ export function BoardScreen() {
     const state = { columns: useBoardStore.getState().columns, cards: useBoardStore.getState().cards };
     const card = state.cards.find(c => c.id === cardId);
     if (!card) return;
-    // No-op guard: dropped back in (roughly) the same spot.
+
+    if (toColumnId === card.columnId) {
+      const indexWithoutCard = state.cards.filter(
+        c => c.columnId === toColumnId && c.id !== cardId && c.order < card.order,
+      ).length;
+      if (toIndex === indexWithoutCard) return;
+    }
+
     const built = buildMoveCardAction(state, cardId, toColumnId, toIndex);
     dispatchAction(built);
   };

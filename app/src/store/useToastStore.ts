@@ -7,28 +7,30 @@ export interface ToastState {
   durationMs: number;
   onAction?: () => void;
   onExpire?: () => void;
+  seq: number;
 }
 
 interface ToastStore extends ToastState {
-  show: (toast: Omit<ToastState, 'visible'>) => void;
+  show: (toast: Omit<ToastState, 'visible' | 'seq'>) => void;
   hide: () => void;
 }
 
 const DEFAULT: ToastState = {
   visible: false,
   message: '',
+  actionLabel: undefined,
   durationMs: 3000,
+  onAction: undefined,
+  onExpire: undefined,
+  seq: 0,
 };
 
-/**
- * A single, app-wide toast/snackbar. Used for two things:
- *  - Undo affordance on destructive actions (5s window, `actionLabel: 'Undo'`).
- *  - Error surfacing when the server rejects an optimistic change.
- * One at a time is enough for this app's scope; a new toast simply replaces
- * whatever's showing.
- */
-export const useToastStore = create<ToastStore>(set => ({
+export const useToastStore = create<ToastStore>((set, get) => ({
   ...DEFAULT,
-  show: toast => set({ ...toast, visible: true }),
+  show: toast => {
+    const prev = get();
+    if (prev.visible && prev.onExpire) prev.onExpire();
+    set({ ...DEFAULT, ...toast, seq: prev.seq + 1, visible: true });
+  },
   hide: () => set({ visible: false }),
 }));

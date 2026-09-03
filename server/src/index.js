@@ -1,27 +1,9 @@
-/**
- * Mock realtime Kanban server.
- *
- * This is deliberately NOT a real backend. It holds board state in a plain
- * in-memory object, speaks Socket.IO, and exists purely so the React Native
- * app has something to optimistically-update-against, sync through, and
- * occasionally get rejected by. Restarting this process wipes all data back
- * to the seed board below -- that's fine, the client is the source of truth
- * for what a *user* sees; this server only needs to be good enough to
- * exercise confirm / reject / broadcast.
- *
- * Run with: npm start   (defaults to http://localhost:4000)
- */
-
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
 const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 4000;
-
-// ---------------------------------------------------------------------------
-// In-memory board state
-// ---------------------------------------------------------------------------
 
 function now() {
   return Date.now();
@@ -88,19 +70,6 @@ function seedBoard() {
 
 let board = seedBoard();
 
-// ---------------------------------------------------------------------------
-// Rejection simulation
-//
-// The brief specifically wants to see optimistic UI rolling back when the
-// server rejects a change. Two ways to trigger that during a demo/recording:
-//
-//   1. Deterministic: give a card a title containing "FAIL" (case-insensitive).
-//      Guaranteed rejection -- use this on camera.
-//   2. Randomised: a small background chance any write is rejected, so the
-//      app also has to survive an *unexpected* rejection, not just the
-//      scripted one.
-// ---------------------------------------------------------------------------
-
 const RANDOM_REJECT_RATE = 0.08;
 
 function shouldReject(action) {
@@ -115,10 +84,6 @@ function shouldReject(action) {
   }
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// Action application (mutates `board`, returns the confirmed patch to relay)
-// ---------------------------------------------------------------------------
 
 function applyAction(action) {
   const { type, payload } = action;
@@ -149,7 +114,7 @@ function applyAction(action) {
 
     case 'DELETE_CARD': {
       board.cards = board.cards.filter(c => c.id !== payload.cardId);
-      return { kind: 'removeCard', cardId: payload.cardId };
+      return { kind: 'removeCard', cardId: payload.cardId, version: nextVersion++ };
     }
 
     case 'MOVE_CARD': {
@@ -171,10 +136,6 @@ function applyAction(action) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Server wiring
-// ---------------------------------------------------------------------------
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -183,7 +144,6 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, cards: board.cards.length, connections: io.engine.clientsCount });
 });
 
-// Handy for debugging in a browser while the app is running.
 app.get('/board', (_req, res) => res.json(board));
 
 app.post('/reset', (_req, res) => {
@@ -201,7 +161,6 @@ io.on('connection', socket => {
   // eslint-disable-next-line no-console
   console.log(`[server] client connected: ${socket.id} (${io.engine.clientsCount} total)`);
 
-  // Send the current authoritative state to whoever just joined.
   socket.emit('board:init', board);
 
   socket.on('board:action', (action, ack) => {
@@ -216,11 +175,9 @@ io.on('connection', socket => {
 
       const patch = applyAction(action);
 
-      // Simulate real network latency so "optimistic" actually means something.
       const latency = 150 + Math.random() * 500;
       setTimeout(() => {
         if (typeof ack === 'function') ack({ ok: true, patch });
-        // Broadcast the confirmed change to every *other* connected session.
         socket.broadcast.emit('board:remote-update', patch);
       }, latency);
     } catch (err) {

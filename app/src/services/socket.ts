@@ -41,13 +41,6 @@ const ACK_TIMEOUT_MS = 6000;
 
 export type SendResult = ServerAck | { ok: false; error: 'TIMEOUT' };
 
-/**
- * Send one queued action and resolve with its ack -- or, if nothing comes
- * back within ACK_TIMEOUT_MS, resolve with a synthetic timeout result. A
- * timeout is treated as "unknown, try again later" by the queue processor,
- * NOT as a rejection: we don't actually know whether the server saw it, so
- * we don't roll back.
- */
 export function sendAction(action: QueueAction): Promise<SendResult> {
   const s = getSocket();
   return new Promise(resolve => {

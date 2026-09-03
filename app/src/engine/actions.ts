@@ -24,12 +24,6 @@ function findCardOrThrow(state: BoardState, cardId: string): Card {
   return card;
 }
 
-/**
- * Fractional/"Trello-style" ordering: to drop a card at `targetIndex` within
- * `cardsInColumn` (already sorted by order, and NOT including the card being
- * moved), we only need a number between its new neighbours. This avoids
- * rewriting the order of every other card in the column on every drag.
- */
 export function computeOrderForIndex(cardsInColumn: Card[], targetIndex: number): number {
   if (cardsInColumn.length === 0) return 0;
   if (targetIndex <= 0) return cardsInColumn[0].order - 1;
@@ -59,7 +53,7 @@ export function buildCreateCardAction(
     imageUri: input.imageUri,
     order,
     updatedAt: Date.now(),
-    version: 0, // 0 = "not yet confirmed by the server"
+    version: 0,
   };
 
   const payload: CreateCardPayload = { card };
@@ -86,9 +80,6 @@ export function buildUpdateCardAction(
     type: 'UPDATE_CARD',
     payload,
     forwardPatch: { kind: 'upsertCard', card: updated },
-    // Restoring the exact previous card is safe: this patch only ever
-    // touches this one card's row, so it can't stomp on other cards'
-    // concurrent optimistic changes.
     inversePatch: { kind: 'upsertCard', card: existing },
   };
 }

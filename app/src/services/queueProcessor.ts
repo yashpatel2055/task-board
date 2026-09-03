@@ -1,10 +1,10 @@
 import NetInfo from '@react-native-community/netinfo';
-import { mergeConfirmedPatch } from '../engine/patch';
+import { mergeConfirmedPatch, recordTombstone, reconcileServerBoard } from '../engine/patch';
 import { useBoardStore } from '../store/useBoardStore';
 import { useNetworkStore } from '../store/useNetworkStore';
 import { useQueueStore } from '../store/useQueueStore';
 import { useToastStore } from '../store/useToastStore';
-import { QueueAction, BoardPatch } from '../types';
+import { QueueAction, BoardPatch, BoardState } from '../types';
 import { generateId } from '../utils/id';
 import { getSocket, onBoardInit, onRemoteUpdate, sendAction } from './socket';
 import { BuiltAction } from '../engine/actions';
@@ -12,32 +12,41 @@ import { BuiltAction } from '../engine/actions';
 let inFlight: Promise<void> | null = null;
 let started = false;
 
-/**
- * Test-only escape hatch: the module-level `inFlight`/`started` state is
- * intentional (it makes the processor a safe-to-call-from-anywhere
- * singleton in the app), but that same module-level state would otherwise
- * leak between unrelated test cases in the same file. Tests call this in
- * `beforeEach` instead of reaching for `jest.resetModules()` every time.
- */
+const MAX_SEND_RETRIES = 8;
+
+const tombstones = new Map<string, number>();
+
+function whenStoresHydrated(cb: () => void): void {
+  let boardReady = useBoardStore.persist.hasHydrated();
+  let queueReady = useQueueStore.persist.hasHydrated();
+  const runIfReady = () => {
+    if (boardReady && queueReady) cb();
+  };
+  if (!boardReady) {
+    useBoardStore.persist.onFinishHydration(() => {
+      boardReady = true;
+      runIfReady();
+    });
+  }
+  if (!queueReady) {
+    useQueueStore.persist.onFinishHydration(() => {
+      queueReady = true;
+      runIfReady();
+    });
+  }
+  runIfReady();
+}
+
 export function __resetQueueProcessorForTests(): void {
   inFlight = null;
   started = false;
+  tombstones.clear();
 }
 
-/**
- * Apply a patch to the board store immediately -- this is "optimistic UI"
- * in one line: no network involved, no queue involved, just render the new
- * state right now.
- */
 export function applyOptimistic(patch: BoardPatch) {
   useBoardStore.getState().apply(patch);
 }
 
-/**
- * Push a built action onto the persisted offline queue and kick the
- * processor. Does NOT touch board state -- call `applyOptimistic` first
- * (or rely on `dispatchAction` below, which does both).
- */
 export function enqueueAction(built: BuiltAction): QueueAction {
   const action: QueueAction = {
     localId: generateId('act'),
@@ -54,27 +63,13 @@ export function enqueueAction(built: BuiltAction): QueueAction {
   return action;
 }
 
-/** Optimistic apply + enqueue, for the common case (create/update/move). */
 export function dispatchAction(built: BuiltAction): QueueAction {
   applyOptimistic(built.forwardPatch);
   return enqueueAction(built);
 }
 
-/**
- * Drains the offline queue strictly in FIFO order, one action at a time.
- * Safe to call as often as you like (network change, reconnect, enqueue,
- * periodic timer) -- redundant calls while a drain is already running just
- * attach to that same in-flight drain rather than starting a second one or
- * silently no-op-ing, so every caller's `await processQueue()` reliably
- * resolves only once the queue has actually been drained.
- */
 export function processQueue(): Promise<void> {
   if (inFlight) {
-    // A drain is already running. Don't start a second one -- but don't
-    // just drop this call either (conditions may have changed, e.g. we
-    // just came back online, or a new action was enqueued, after the
-    // current drain had already decided there was nothing to do): chain
-    // onto it and re-check once it finishes.
     return inFlight.then(() => processQueue());
   }
   const p = drainQueue().finally(() => {
@@ -84,13 +79,29 @@ export function processQueue(): Promise<void> {
   return p;
 }
 
+function backOffOrGiveUp(action: QueueAction): void {
+  const attempts = action.retries + 1;
+  if (attempts >= MAX_SEND_RETRIES) {
+    useQueueStore
+      .getState()
+      .setStatus(action.localId, 'failed', 'Could not reach the server after several tries.');
+    useToastStore.getState().show({
+      message: "Some changes couldn't sync. They'll retry next time the app opens.",
+      durationMs: 4000,
+    });
+  } else {
+    useQueueStore.getState().setStatus(action.localId, 'pending');
+    useQueueStore.getState().incrementRetries(action.localId);
+  }
+}
+
 async function drainQueue(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const { isOnline, isSocketConnected } = useNetworkStore.getState();
     if (!isOnline || !isSocketConnected) return;
 
-    const next = useQueueStore.getState().queue.find(a => a.status !== 'sending');
+    const next = useQueueStore.getState().queue.find(a => a.status === 'pending');
     if (!next) return;
 
     try {
@@ -98,18 +109,16 @@ async function drainQueue(): Promise<void> {
       const result = await sendAction(next);
 
       if (result.ok) {
-        // Server-confirmed truth replaces our optimistic guess (picks up
-        // the real `updatedAt`/`version`, and for creates, confirms the id
-        // we chose client-side is now canonical).
+        recordTombstone(tombstones, result.patch, {
+          columns: useBoardStore.getState().columns,
+          cards: useBoardStore.getState().cards,
+        });
         useBoardStore.getState().apply(result.patch);
         useQueueStore.getState().removeAction(next.localId);
       } else if (result.error === 'TIMEOUT') {
-        // Unknown outcome -- leave it queued and pending, don't roll back.
-        useQueueStore.getState().setStatus(next.localId, 'pending');
-        useQueueStore.getState().incrementRetries(next.localId);
-        return; // avoid a tight retry loop; the periodic timer will pick it back up
+        backOffOrGiveUp(next);
+        return;
       } else {
-        // Real rejection: roll back the optimistic change and tell the user.
         useBoardStore.getState().apply(next.inversePatch);
         useQueueStore.getState().removeAction(next.localId);
         useToastStore.getState().show({
@@ -118,27 +127,17 @@ async function drainQueue(): Promise<void> {
         });
       }
     } catch {
-      // Unexpected local error sending -- treat like a timeout, retry later.
-      useQueueStore.getState().setStatus(next.localId, 'pending');
+      backOffOrGiveUp(next);
       return;
     }
   }
 }
 
-/**
- * Wire everything up once, near app startup:
- *  - NetInfo reachability -> useNetworkStore.isOnline
- *  - socket connect/disconnect -> useNetworkStore.isSocketConnected (handled in socket.ts)
- *  - board:init -> seed the board store on first connect
- *  - board:remote-update -> merge other sessions' confirmed changes
- *  - queue length going up, or coming back online -> drain the queue
- *  - a slow periodic safety-net retry, in case a trigger was missed
- */
 export function startSyncEngine(): () => void {
   if (started) return () => {};
   started = true;
 
-  getSocket(); // establish the connection
+  getSocket();
 
   const unsubNetInfo = NetInfo.addEventListener(state => {
     const online = Boolean(state.isConnected && state.isInternetReachable !== false);
@@ -146,21 +145,22 @@ export function startSyncEngine(): () => void {
     if (online) void processQueue();
   });
 
+  const applyServerBoard = (board: BoardState) => {
+    const local = { columns: useBoardStore.getState().columns, cards: useBoardStore.getState().cards };
+    const queue = useQueueStore.getState().queue;
+    const next = reconcileServerBoard(local, board, queue, tombstones);
+    useBoardStore.setState({ columns: next.columns, cards: next.cards });
+  };
+
   const unsubInit = onBoardInit(board => {
-    // Only seed from the server if we don't already have a board (fresh
-    // install / first launch). If we already have local state -- including
-    // possibly-unsynced offline edits -- we don't want to stomp it; the
-    // queue will reconcile any pending actions on its own.
-    const current = useBoardStore.getState();
-    if (current.columns.length === 0 && current.cards.length === 0) {
-      useBoardStore.getState().setBoard(board);
-    }
+    whenStoresHydrated(() => applyServerBoard(board));
   });
 
   const unsubRemote = onRemoteUpdate(patch => {
     const state = { columns: useBoardStore.getState().columns, cards: useBoardStore.getState().cards };
     const queue = useQueueStore.getState().queue;
-    const next = mergeConfirmedPatch(state, patch, queue);
+    recordTombstone(tombstones, patch, state);
+    const next = mergeConfirmedPatch(state, patch, queue, tombstones);
     useBoardStore.setState({ columns: next.columns, cards: next.cards });
   });
 

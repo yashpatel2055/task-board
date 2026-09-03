@@ -37,7 +37,8 @@ interface DragContextValue {
   translateY: SharedValue<number>;
   draggingCard: Card | null;
 
-  beginDrag: (card: Card, originPageX: number, originPageY: number) => void;
+  prepareDrag: (excludeCardId: string) => void;
+  beginDrag: (card: Card) => void;
   endDrag: (absoluteX: number, absoluteY: number) => void;
   cancelDrag: () => void;
 }
@@ -52,24 +53,9 @@ export function useDragContext(): DragContextValue {
 
 interface Props {
   children: React.ReactNode;
-  /** Called once hit-testing resolves a drop to a (possibly unchanged) column + index. */
   onDrop: (cardId: string, toColumnId: string, toIndex: number) => void;
 }
 
-/**
- * Coordinates cross-column drag-and-drop without a third-party DnD library.
- *
- * Strategy: while nothing is being dragged, every column and every card
- * registers a ref. The moment a drag begins we freeze scrolling (both the
- * horizontal column row and each column's own vertical list -- see
- * `isDragging` consumed by Column.tsx) and take one fresh `measure()` pass
- * over every registered column/card to get their absolute page coordinates.
- * Because scrolling is frozen for the duration of the gesture, those
- * coordinates stay valid all the way to `onEnd`, which is what lets the
- * drop hit-test just be "which column's x-range contains the finger" and
- * "how many cards in that column sit above the finger's y" -- no scroll
- * offset math needed.
- */
 export function DragProvider({ children, onDrop }: Props) {
   const columnRefs = useRef(new Map<string, React.RefObject<View>>());
   const cardRefs = useRef(new Map<string, { columnId: string; order: number; ref: React.RefObject<View> }>());
@@ -79,8 +65,6 @@ export function DragProvider({ children, onDrop }: Props) {
 
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
-  const originX = useRef(0);
-  const originY = useRef(0);
 
   const columnLayouts = useRef<ColumnLayout[]>([]);
   const cardLayouts = useRef<CardLayout[]>([]);
@@ -121,18 +105,17 @@ export function DragProvider({ children, onDrop }: Props) {
     cardLayouts.current = cards;
   }, []);
 
-  const beginDrag = useCallback(
-    (card: Card, originPageX: number, originPageY: number) => {
-      measureAll(card.id);
-      originX.current = originPageX;
-      originY.current = originPageY;
-      translateX.value = originPageX;
-      translateY.value = originPageY;
-      setDraggingCardId(card.id);
-      setDraggingCard(card);
+  const prepareDrag = useCallback(
+    (excludeCardId: string) => {
+      measureAll(excludeCardId);
     },
-    [measureAll, translateX, translateY],
+    [measureAll],
   );
+
+  const beginDrag = useCallback((card: Card) => {
+    setDraggingCardId(card.id);
+    setDraggingCard(card);
+  }, []);
 
   const endDrag = useCallback(
     (absoluteX: number, absoluteY: number) => {
@@ -140,9 +123,6 @@ export function DragProvider({ children, onDrop }: Props) {
       const cards = cardLayouts.current;
 
       if (draggingCard && columns.length > 0) {
-        // Which column's horizontal span contains the drop point? Fall back
-        // to the closest column center if the finger ended up just outside
-        // every span (e.g. dropped past the last column's right edge).
         let targetColumn =
           columns.find(c => absoluteX >= c.pageX && absoluteX <= c.pageX + c.width) ?? null;
         if (!targetColumn) {
@@ -153,8 +133,6 @@ export function DragProvider({ children, onDrop }: Props) {
           }, columns[0]);
         }
 
-        // Within that column, count how many cards sit above the drop
-        // point (by their vertical midpoint) -- that count is the index.
         const cardsInTarget = cards
           .filter(c => c.columnId === targetColumn!.columnId)
           .sort((a, b) => a.order - b.order);
@@ -193,11 +171,12 @@ export function DragProvider({ children, onDrop }: Props) {
       translateX,
       translateY,
       draggingCard,
+      prepareDrag,
       beginDrag,
       endDrag,
       cancelDrag,
     }),
-    [registerColumnRef, registerCardRef, unregisterCardRef, draggingCardId, translateX, translateY, draggingCard, beginDrag, endDrag, cancelDrag],
+    [registerColumnRef, registerCardRef, unregisterCardRef, draggingCardId, translateX, translateY, draggingCard, prepareDrag, beginDrag, endDrag, cancelDrag],
   );
 
   return <DragContext.Provider value={value}>{children}</DragContext.Provider>;

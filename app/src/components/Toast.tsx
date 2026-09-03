@@ -2,13 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useToastStore } from '../store/useToastStore';
 
-/**
- * A single app-wide toast/snackbar. Backs two features from the brief:
- *  - Undo on delete (~5s window, shown with an "Undo" action).
- *  - Surfacing the error when the server rejects an optimistic change.
- */
 export function Toast() {
-  const { visible, message, actionLabel, durationMs, onAction, onExpire, hide } = useToastStore();
+  const { visible, message, actionLabel, durationMs, onAction, onExpire, seq, hide } = useToastStore();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -24,7 +19,7 @@ export function Toast() {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, message]);
+  }, [visible, seq]);
 
   if (!visible) return null;
 

@@ -1,8 +1,3 @@
-/**
- * Kanban Board -- React Native machine test.
- * @format
- */
-
 import React, { useEffect } from 'react';
 import { StatusBar, StyleSheet, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';

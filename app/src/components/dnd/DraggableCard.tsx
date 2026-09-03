@@ -13,18 +13,6 @@ interface Props {
   onDelete: () => void;
 }
 
-/**
- * The card as it sits in a column: a real gesture-handler Pan gesture that
- * only "activates" after a short hold (`activateAfterLongPress`), so a
- * quick vertical flick still scrolls the column normally and a deliberate
- * press-and-drag picks the card up. The visible drag animation itself is
- * rendered elsewhere (DragLayer, driven by reanimated shared values on the
- * UI thread) -- this component just fades out while it's the one being
- * dragged, and reports gesture begin/end to DragProvider.
- */
-// Rough offset from the finger to the overlay's top-left corner, so the
-// floating copy feels "grabbed" near where you pressed rather than snapping
-// its center under your finger.
 const GRAB_OFFSET_X = 40;
 const GRAB_OFFSET_Y = 24;
 
@@ -33,6 +21,7 @@ export function DraggableCard({ card, isPending, onPress, onDelete }: Props) {
   const {
     registerCardRef,
     unregisterCardRef,
+    prepareDrag,
     beginDrag,
     endDrag,
     cancelDrag,
@@ -46,10 +35,12 @@ export function DraggableCard({ card, isPending, onPress, onDelete }: Props) {
     return () => unregisterCardRef(card.id);
   }, [card.id, card.columnId, card.order, registerCardRef, unregisterCardRef]);
 
+  const handlePrepare = () => {
+    prepareDrag(card.id);
+  };
+
   const handleBegin = () => {
-    viewRef.current?.measure((_x, _y, _w, _h, pageX, pageY) => {
-      beginDrag(card, pageX, pageY);
-    });
+    beginDrag(card);
   };
 
   const handleEnd = (absoluteX: number, absoluteY: number) => {
@@ -57,19 +48,17 @@ export function DraggableCard({ card, isPending, onPress, onDelete }: Props) {
   };
 
   const handleFinalize = () => {
-    // Safety net: if the gesture was cancelled/interrupted before onEnd
-    // fired (e.g. the OS stole the gesture), make sure we don't leave the
-    // card stuck faded out forever.
     cancelDrag();
   };
 
   const pan = Gesture.Pan()
     .activateAfterLongPress(220)
     .onBegin(event => {
-      // Position the floating overlay immediately (UI thread, no
-      // runOnJS hop) so there's no visible jump before the first onUpdate.
       translateX.value = event.absoluteX - GRAB_OFFSET_X;
       translateY.value = event.absoluteY - GRAB_OFFSET_Y;
+      runOnJS(handlePrepare)();
+    })
+    .onStart(() => {
       runOnJS(handleBegin)();
     })
     .onUpdate(event => {

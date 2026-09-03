@@ -5,11 +5,6 @@ import { useQueueStore } from '../src/store/useQueueStore';
 import { useToastStore } from '../src/store/useToastStore';
 import { BoardState } from '../src/types';
 
-// The real socket module talks to socket.io-client, which we don't want
-// anywhere near a unit test. Mock it so `sendAction` is fully controllable
-// per-test, which is what lets us deterministically exercise "server
-// confirms", "server rejects", and "server times out" without a real
-// server or real network timing.
 jest.mock('../src/services/socket', () => ({
   sendAction: jest.fn(),
   getSocket: jest.fn(),
@@ -40,14 +35,12 @@ beforeEach(() => {
   useBoardStore.setState(emptyBoard());
   useQueueStore.setState({ queue: [], hydrated: true });
   useToastStore.setState({ visible: false, message: '', durationMs: 3000 });
-  // Both flags need to be true for the processor to attempt sends at all --
-  // this is what "offline" tests flip off.
   useNetworkStore.setState({ isOnline: true, isSocketConnected: true });
 });
 
 describe('offline queue + reconciliation (queueProcessor)', () => {
   it('applies the optimistic patch to the board immediately, before any network round trip', () => {
-    sendActionMock.mockReturnValue(new Promise(() => {})); // never resolves
+    sendActionMock.mockReturnValue(new Promise(() => {}));
     const built = buildCreateCardAction(useBoardStore.getState(), { columnId: 'col-a', title: 'New card' });
     dispatchAction(built);
 
@@ -103,12 +96,12 @@ describe('offline queue + reconciliation (queueProcessor)', () => {
     sendActionMock.mockResolvedValue({ ok: false, error: 'Rejected: title contains the demo trigger word "FAIL".' });
 
     dispatchAction(built);
-    expect(useBoardStore.getState().cards[0].title).toBe('This will FAIL validation'); // optimistic
+    expect(useBoardStore.getState().cards[0].title).toBe('This will FAIL validation');
 
     await processQueue();
 
-    expect(useBoardStore.getState().cards[0].title).toBe('Original'); // rolled back
-    expect(useQueueStore.getState().queue).toHaveLength(0); // rejected action is dropped, not retried
+    expect(useBoardStore.getState().cards[0].title).toBe('Original');
+    expect(useQueueStore.getState().queue).toHaveLength(0);
     expect(useToastStore.getState().visible).toBe(true);
     expect(useToastStore.getState().message).toContain('FAIL');
   });
@@ -120,15 +113,30 @@ describe('offline queue + reconciliation (queueProcessor)', () => {
     dispatchAction(built);
     await processQueue();
 
-    expect(useBoardStore.getState().cards).toHaveLength(1); // still shown optimistically
-    expect(useQueueStore.getState().queue).toHaveLength(1); // still queued
+    expect(useBoardStore.getState().cards).toHaveLength(1);
+    expect(useQueueStore.getState().queue).toHaveLength(1);
     expect(useQueueStore.getState().queue[0].status).toBe('pending');
-    // How many times it got retried depends on how many overlapping
-    // processQueue() calls happened to fire (dispatchAction triggers one
-    // itself); what matters for correctness is "at least once, never
-    // dropped, never rolled back."
     expect(useQueueStore.getState().queue[0].retries).toBeGreaterThanOrEqual(1);
-    expect(useToastStore.getState().visible).toBe(false); // no error shown for an ambiguous timeout
+    expect(useToastStore.getState().visible).toBe(false);
+  });
+
+  it('gives up on an action after repeated timeouts: marks it failed, keeps the optimistic change, shows a toast', async () => {
+    sendActionMock.mockResolvedValue({ ok: false, error: 'TIMEOUT' });
+
+    const built = buildCreateCardAction(useBoardStore.getState(), { columnId: 'col-a', title: 'Never acks' });
+    dispatchAction(built);
+
+    for (let i = 0; i < 15; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await processQueue();
+    }
+
+    const q = useQueueStore.getState().queue;
+    expect(q).toHaveLength(1);
+    expect(q[0].status).toBe('failed');
+    expect(useBoardStore.getState().cards).toHaveLength(1);
+    expect(useToastStore.getState().visible).toBe(true);
+    expect(useToastStore.getState().message).toMatch(/sync/i);
   });
 
   it('does not attempt to send anything while offline', async () => {
@@ -161,7 +169,7 @@ describe('offline queue + reconciliation (queueProcessor)', () => {
     useNetworkStore.setState({ isOnline: true, isSocketConnected: true });
     await processQueue();
 
-    expect(order[0]).toContain('act-'); // sanity: real localIds, not undefined
+    expect(order[0]).toContain('act-');
     expect(useQueueStore.getState().queue).toHaveLength(0);
     expect(useBoardStore.getState().cards.map(c => c.title).sort()).toEqual(['Offline #1', 'Offline #2']);
   });

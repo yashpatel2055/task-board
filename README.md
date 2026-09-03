@@ -93,7 +93,7 @@ cd app
 npm test
 ```
 
-29 tests, all passing, covering the reconciliation engine and the offline
+43 tests, all passing, covering the reconciliation engine and the offline
 queue specifically (see below).
 
 ---
@@ -153,7 +153,13 @@ its pre-action snapshot" stepping on unrelated optimistic changes.
    - **Timeout / no ack** → treated as *unknown*, not a rejection. The
      action stays in the queue with `status: 'pending'`; nothing is rolled
      back, because we genuinely don't know if the server saw it. It's
-     retried later (next reconnect, or a 5s safety-net timer).
+     retried later (next reconnect, or a 5s safety-net timer). After
+     `MAX_SEND_RETRIES` (8) failed sends it's parked as `status: 'failed'`
+     — still in the queue and still counted in the "pending sync" badge, but
+     no longer retried this session (so one poison action or a long outage
+     can't pin the whole queue) — and retried again with a fresh budget on
+     the next app launch. Actions left `sending` when the app is killed are
+     also reset to `pending` on relaunch (they were never really in flight).
 5. **Offline is just "step 4 can't run yet."** If the device has no
    connectivity (or the socket isn't connected), `processQueue()` simply
    returns without sending — everything from step 2–3 already happened, so
@@ -162,8 +168,21 @@ its pre-action snapshot" stepping on unrelated optimistic changes.
    (a NetInfo listener, or the socket reconnecting), the queue drains
    automatically, strictly in the order actions were originally created —
    see `app/__tests__/queueProcessor.test.ts` for the FIFO-ordering test.
+   Both the queue **and the board projection itself** (`useBoardStore`) are
+   persisted to AsyncStorage via `zustand/persist`, so killing and
+   relaunching the app while offline brings back the board *and* its pending
+   edits, not just a bare "N pending sync" counter.
 6. **Remote updates from another session** arrive as `board:remote-update`
    broadcasts and go through `mergeConfirmedPatch()` (see next section).
+7. **Reconnecting after being away.** On every (re)connect the server sends
+   a full `board:init` snapshot. Rather than replacing local state with it,
+   `reconcileServerBoard()` merges it in card by card: a card with a pending
+   local action keeps its optimistic value, an offline-created card the
+   server hasn't seen yet is preserved, tombstoned ids aren't resurrected,
+   and everything else takes the server's version when it's newer — which is
+   how a session that was offline catches up on other people's edits. It
+   waits for both persisted stores to finish rehydrating first, so a fast
+   `board:init` can't race an in-progress AsyncStorage read.
 
 ### Conflict handling
 
@@ -182,6 +201,14 @@ Two situations can conflict with a locally-optimistic card:
   `mergeConfirmedPatch` ignores an incoming patch whose `version` is not
   newer than what's already stored — cheap protection against delivery
   reordering.
+- **A stale broadcast for an already-deleted card.** A `version` check
+  alone can't catch this: once the card is gone there's nothing local to
+  compare against, so a reordered `upsertCard` from *before* the delete
+  would resurrect it. Confirmed deletes therefore carry a `version` too, and
+  the client keeps a small `tombstones` map (`cardId → version-at-deletion`)
+  in `queueProcessor.ts`; `mergeConfirmedPatch` drops any `upsertCard` whose
+  version isn't newer than the tombstone. A genuine re-create gets a fresh,
+  higher version from the server and so still comes through.
 - **Two sessions edit the same card with nothing pending locally.** The
   server is the single source of truth and confirms writes in the order it
   receives them, so this resolves as **last-write-wins** by construction —
@@ -197,16 +224,27 @@ right amount of sophistication to build *and* to explain in an interview.
 ### Everything above is unit-tested, not just described
 
 - `app/__tests__/engine.test.ts` — `applyPatch`, every action builder's
-  forward/inverse pair, fractional drag-and-drop ordering, and
-  `mergeConfirmedPatch`'s three conflict rules.
+  forward/inverse pair, fractional drag-and-drop ordering,
+  `mergeConfirmedPatch`'s conflict rules, the delete-tombstone guard against
+  a stale broadcast resurrecting a deleted card, and `reconcileServerBoard`
+  merging a reconnect snapshot without clobbering pending local edits.
 - `app/__tests__/queueProcessor.test.ts` — FIFO ordering, optimistic apply
   before any network call, confirm-replaces-optimistic, reject-rolls-back
-  (+ toast), timeout-stays-pending-not-rolled-back, offline-doesn't-send,
-  and replay-on-reconnect. The real socket module is mocked out so these
-  run in milliseconds with no server needed.
+  (+ toast), timeout-stays-pending-not-rolled-back, give-up-as-`failed`
+  after repeated timeouts, offline-doesn't-send, and replay-on-reconnect.
+  The real socket module is mocked out so these run in milliseconds with no
+  server needed.
 - `app/__tests__/queuePersistence.test.ts` — the queue is actually written
-  to AsyncStorage on enqueue/remove, and a **fresh store instance**
-  (simulating an app relaunch) rehydrates a previously-persisted queue.
+  to AsyncStorage on enqueue/remove, a **fresh store instance** (simulating
+  an app relaunch) rehydrates a previously-persisted queue, and an action
+  left mid-`sending` (or previously `failed`) is reset to `pending` on that
+  cold start.
+- `app/__tests__/toastStore.test.ts` — a replaced toast flushes its
+  `onExpire` (so a rapid second delete can't silently drop the first
+  delete's sync), and stale action/label fields don't leak between toasts.
+- `app/__tests__/boardPersistence.test.ts` — the board projection is written
+  to AsyncStorage as patches are applied, and a fresh store instance
+  rehydrates it on a simulated relaunch.
 
 Run them with `cd app && npm test`.
 
@@ -221,14 +259,15 @@ Run them with `cd app && npm test`.
 | Optimistic updates + rollback on reject | `dispatchAction` / `processQueue` in `services/queueProcessor.ts` |
 | Near real-time sync (2 sessions) | `server/src/index.js` (Socket.IO broadcast) + `onRemoteUpdate` in `services/socket.ts` |
 | Offline queue, visibly "pending sync" | `useQueueStore` (persisted) + the pending badge in `CardVisual.tsx` |
+| Board survives an offline relaunch | `useBoardStore` persisted to AsyncStorage; `reconcileServerBoard` merges the server snapshot back in on reconnect |
 | Attachments (camera/gallery, thumbnail) | `CardEditModal.tsx` via `react-native-image-picker` |
 | Search/filter by keyword or assignee | `SearchBar.tsx` + `matchesQuery` in `BoardScreen.tsx` |
 | Undo (~5s) on delete | `handleDelete` in `BoardScreen.tsx` + `Toast.tsx` |
 | TypeScript | the whole app (`tsc --noEmit` is clean) |
 | gesture-handler + reanimated for DnD | `components/dnd/*` |
 | Reconciliation layer, state mgmt of choice | Zustand (`store/*`) + `engine/patch.ts` |
-| Local persistence for offline queue | `useQueueStore` via `zustand/persist` + AsyncStorage |
-| Automated test on offline-queue/reconciliation | `__tests__/engine.test.ts`, `__tests__/queueProcessor.test.ts`, `__tests__/queuePersistence.test.ts` |
+| Local persistence for offline queue | `useQueueStore` (and `useBoardStore`) via `zustand/persist` + AsyncStorage |
+| Automated test on offline-queue/reconciliation | `__tests__/engine.test.ts`, `__tests__/queueProcessor.test.ts`, `__tests__/queuePersistence.test.ts`, `__tests__/boardPersistence.test.ts` |
 | Open-source libraries only | everything in `package.json` is OSS; the mock server needs no account/paid service |
 
 ## Demoing rejection/rollback
@@ -251,8 +290,9 @@ moment later reverts and a toast explains why.
 2. Create/edit/move/delete a few cards — notice they apply instantly and
    show a "Pending sync" badge, and the header shows an "N pending sync"
    counter plus a red offline banner.
-3. Kill and relaunch the app while still offline — the queue survives
-   (it's persisted), the badges are still there.
+3. Kill and relaunch the app while still offline — the board and its cards
+   come back (the projection is persisted too), the queue survives, and the
+   per-card "Pending sync" badges are still there.
 4. Restore connectivity (disable Airplane Mode / restart the server) — the
    queue drains automatically, in the order the actions were made.
 
@@ -266,6 +306,12 @@ moment later reverts and a toast explains why.
   something's slightly off on first run, it's most likely in the hit-testing
   offsets in `DragProvider.endDrag` or the grab-offset constants in
   `DraggableCard.tsx` — both are small, well-isolated, and commented.
+  The gesture wiring itself was hardened after a review pass: the card is
+  now picked up in the pan's `onStart` (after the long-press activates), not
+  `onBegin` (touch-down), so a plain tap to open or delete a card no longer
+  flashes the drag overlay; and the `measure()` pass that feeds the drop
+  hit-test is kicked off on touch-down so its async results are ready by the
+  time a real drop lands.
 - **No auto-scroll while dragging.** Both the horizontal column row and each
   column's vertical list disable scrolling for the duration of a drag (see
   the comment in `DragProvider.tsx` for why — it's what lets the hit-testing
@@ -297,11 +343,11 @@ moment later reverts and a toast explains why.
 app/src/
   types/            Card, Column, BoardState, QueueAction, BoardPatch, ...
   engine/           applyPatch (pure), action builders, fractional ordering
-  store/            Zustand stores: board, offline queue (persisted), network, toast
-  services/         socket.ts (Socket.IO client), queueProcessor.ts (the FIFO drain loop), config.ts
+  store/            Zustand stores: board (persisted), offline queue (persisted), network, toast
+  services/         socket.ts (Socket.IO client), queueProcessor.ts (the FIFO drain loop + reconnect reconcile), config.ts
   screens/          BoardScreen.tsx
   components/       Column, CardVisual, SearchBar, Toast, modals/CardEditModal
   components/dnd/   DragProvider (context + hit-testing), DraggableCard, DragLayer
-  __tests__/        engine, queueProcessor, queuePersistence, App (see App.test.tsx for why it's minimal)
+  __tests__/        engine, queueProcessor, queuePersistence, boardPersistence, toastStore, App (see App.test.tsx for why it's minimal)
 server/src/index.js  in-memory board + Socket.IO mock backend
 ```

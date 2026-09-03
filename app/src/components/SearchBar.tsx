@@ -6,7 +6,6 @@ interface Props {
   onChange: (value: string) => void;
 }
 
-/** Filters cards by keyword (title/description) or assignee, across every column at once. */
 export function SearchBar({ value, onChange }: Props) {
   return (
     <View style={styles.wrap}>

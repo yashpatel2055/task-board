@@ -5,7 +5,6 @@ import { QueueAction, QueueActionStatus } from '../types';
 
 interface QueueStore {
   queue: QueueAction[];
-  /** True once the persisted queue has been read back from AsyncStorage. */
   hydrated: boolean;
   setHydrated: (v: boolean) => void;
 
@@ -16,14 +15,6 @@ interface QueueStore {
   clear: () => void;
 }
 
-/**
- * The offline action queue, persisted to AsyncStorage so it survives an app
- * restart while offline. This is the thing the brief explicitly wants an
- * automated test against, so it's kept intentionally dumb: an ordered array
- * plus a handful of pure mutations. Ordering is FIFO by array position,
- * which is also insertion order -- actions are always pushed to the end and
- * the processor always drains from the front.
- */
 export const useQueueStore = create<QueueStore>()(
   persist(
     (set, get) => ({
@@ -54,9 +45,16 @@ export const useQueueStore = create<QueueStore>()(
     {
       name: 'kanban-offline-queue',
       storage: createJSONStorage(() => AsyncStorage),
-      // Only the queue itself needs to survive a restart; `hydrated` is
-      // runtime bookkeeping.
       partialize: state => ({ queue: state.queue }),
+      merge: (persisted, current) => {
+        const savedQueue = (persisted as { queue?: QueueAction[] } | undefined)?.queue ?? [];
+        const queue = savedQueue.map(a =>
+          a.status === 'pending'
+            ? a
+            : { ...a, status: 'pending' as QueueActionStatus, retries: 0, lastError: undefined },
+        );
+        return { ...current, queue };
+      },
       onRehydrateStorage: () => state => {
         state?.setHydrated(true);
       },

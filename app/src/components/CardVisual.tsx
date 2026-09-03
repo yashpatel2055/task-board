@@ -10,13 +10,6 @@ interface Props {
   onDelete?: () => void;
 }
 
-/**
- * Pure presentational card body, reused both by the in-list card (via
- * DraggableCard) and by the floating overlay that follows your finger
- * while dragging (DragLayer). Keeping this separate from the gesture
- * plumbing means "what a card looks like" and "how a card is dragged"
- * can be reasoned about independently.
- */
 export function CardVisual({ card, isPending, dragging, onPress, onDelete }: Props) {
   return (
     <Pressable

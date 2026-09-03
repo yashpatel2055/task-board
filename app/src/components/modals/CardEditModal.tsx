@@ -20,7 +20,6 @@ export interface CardEditResult {
 
 interface Props {
   visible: boolean;
-  /** Present for edit, undefined for create. */
   editingCard: Card | null;
   onCancel: () => void;
   onSave: (result: CardEditResult) => void;
